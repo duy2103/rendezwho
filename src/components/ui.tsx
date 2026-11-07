@@ -55,11 +55,11 @@ export function Page({
           contentContainerStyle={styles.content}
         >
           <View style={{ gap: 8 }}>
-            {eyebrow && <Eyebrow>{eyebrow}</Eyebrow>}
+            {eyebrow ? <Eyebrow>{eyebrow}</Eyebrow> : null}
             <Text accessibilityRole="header" style={styles.title}>
               {title}
             </Text>
-            {subtitle && <Copy>{subtitle}</Copy>}
+            {subtitle ? <Copy>{subtitle}</Copy> : null}
           </View>
           {children}
         </ScrollView>
