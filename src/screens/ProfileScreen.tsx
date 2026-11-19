@@ -1,8 +1,12 @@
+import { disablePush } from '../lib/push';
+import AccountSettings from '../components/AccountSettings';
+import { router } from 'expo-router';
 import { useCallback, useState } from 'react';
 import { database } from '../lib/supabase';
 import { useAuth } from '../providers/AuthProvider';
 import {
   deleteMyAccount,
+  listCommunities,
   getProfile,
   saveProfile,
   type City,
@@ -52,6 +56,9 @@ function ProfileForm({
   );
 }
 function DeleteAccount() {
+  const userId = useAuth().session!.user.id;
+  const groups = useResource(useCallback(() => listCommunities(userId), [userId]));
+  const owned = groups.data?.filter((group) => group.owner_id === userId) ?? [];
   const [confirmation, setConfirmation] = useState('');
   const [open, setOpen] = useState(false);
   const mutation = useMutation();
@@ -60,8 +67,22 @@ function DeleteAccount() {
     <Card>
       <Copy>
         Account deletion is permanent. Your profile, travel plans, saved places, reviews and
-        authored messages will be erased. Transfer ownership of any communities first.
+        authored messages will be erased. Safety reports may be retained for moderation. Transfer
+        ownership of or delete your communities first.
       </Copy>
+      {!!groups.error && <Copy error>{groups.error}</Copy>}
+      {owned.map((group) => (
+        <Copy key={group.id}>
+          You own {group.name}. Transfer ownership or delete this community first.
+        </Copy>
+      ))}
+      {owned.length > 0 && (
+        <Button
+          title="Manage my communities"
+          secondary
+          onPress={() => router.push('/communities')}
+        />
+      )}
       <Field
         label="Type DELETE to confirm"
         value={confirmation}
@@ -72,7 +93,13 @@ function DeleteAccount() {
       {!!mutation.error && <Copy error>{mutation.error}</Copy>}
       <Button
         title="Permanently delete my account"
-        disabled={confirmation !== 'DELETE' || mutation.busy}
+        disabled={
+          confirmation !== 'DELETE' ||
+          mutation.busy ||
+          groups.loading ||
+          !!groups.error ||
+          owned.length > 0
+        }
         onPress={() => void mutation.run(deleteMyAccount)}
       />
       <Button
@@ -116,11 +143,13 @@ export default function Profile() {
         disabled={mutation.busy}
         onPress={() =>
           void mutation.run(async () => {
+            await disablePush();
             const { error } = await database().auth.signOut();
             if (error) throw error;
           })
         }
       />
+      <AccountSettings />
       <DeleteAccount />
     </Page>
   );

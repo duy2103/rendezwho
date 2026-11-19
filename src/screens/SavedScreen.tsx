@@ -1,197 +1,125 @@
-import { useCallback, useEffect, useState } from 'react';
-import { Pressable, Text, View } from 'react-native';
-import { Bookmark, Coffee } from 'lucide-react-native';
-import Sheet from '../components/Sheet';
-import { colors, fonts } from '../theme/tokens';
+import { useCallback, useMemo, useState } from 'react';
 import { useAuth } from '../providers/AuthProvider';
-import {
-  deleteOwned,
-  listSaved,
-  savePlace,
-  searchPlaces,
-  type City,
-  type Place,
-} from '../lib/data';
-import { useMutation, useResource } from '../lib/useResource';
-import CityPicker from '../components/CityPicker';
-import { Button, Card, Copy, Field, Loading, Page } from '../components/ui';
+import { listSaved } from '../lib/data';
+import { hasCoordinates, type MapPoint } from '../lib/mapData';
+import { useResource } from '../lib/useResource';
+import { Button, Card, Copy, Field, Heading, Loading, Page } from '../components/ui';
+import SavePlaceSheet from '../components/SavePlaceSheet';
+import PlaceDetails from '../components/PlaceDetails';
+import Sheet from '../components/Sheet';
+import WorldMap from '../components/WorldMap';
 export default function Saved() {
   const id = useAuth().session!.user.id;
-  const resource = useResource(useCallback(() => listSaved(id), [id]));
-  const mutation = useMutation();
-  const [removing, setRemoving] = useState<string | null>(null);
+  const [limit, setLimit] = useState(50);
+  const resource = useResource(useCallback(() => listSaved(id, limit), [id, limit]));
   const [form, setForm] = useState(false);
-  const [city, setCity] = useState<City | null>(null);
-  const [term, setTerm] = useState('');
-  const [place, setPlace] = useState<Place | null>(null);
-  const [places, setPlaces] = useState<Place[]>([]);
-  const [note, setNote] = useState('');
-  const [error, setError] = useState('');
-  useEffect(() => {
-    if (!city?.id || term.trim().length < 2) return;
-    let active = true;
-    const timer = setTimeout(() => {
-      searchPlaces(city.id, term)
-        .then((rows) => {
-          if (active) setPlaces(rows);
-        })
-        .catch((e) => {
-          if (active) setError(e.message);
-        });
-    }, 300);
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
-  }, [city, term]);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState<'all' | 'want_to_go' | 'visited'>('all');
+  const [map, setMap] = useState(false);
+  const filtered = useMemo(
+    () =>
+      (resource.data ?? []).filter(
+        (item) =>
+          (status === 'all' || item.status === status) &&
+          [item.name, item.city, item.place?.category, item.place?.address]
+            .filter(Boolean)
+            .join(' ')
+            .toLowerCase()
+            .includes(query.trim().toLowerCase()),
+      ),
+    [resource.data, status, query],
+  );
+  const points = useMemo(
+    () =>
+      filtered.flatMap((item) =>
+        item.place && hasCoordinates(item.place)
+          ? [
+              {
+                id: item.id,
+                name: item.name,
+                kind: 'place' as const,
+                longitude: item.place.longitude,
+                latitude: item.place.latitude,
+              },
+            ]
+          : [],
+      ),
+    [filtered],
+  ) satisfies MapPoint[];
+  const item = resource.data?.find((row) => row.id === selected);
   return (
     <Page
       title="My places"
-      subtitle="Everything you want to visit, saved, or reviewed."
+      subtitle="Your private wish list and places you have visited."
       onRefresh={resource.reload}
       refreshing={resource.loading && !!resource.data}
     >
       <Button title="Save a place" onPress={() => setForm(true)} />
-      {!!mutation.error && <Copy error>{mutation.error}</Copy>}
-      <Sheet
-        title="Save a place"
-        visible={form}
-        onClose={() => {
-          if (!mutation.busy) setForm(false);
-        }}
-      >
-        <CityPicker
-          value={city}
-          onChange={(value) => {
-            setCity(value);
-            setPlace(null);
-            setPlaces([]);
-            setError('');
-          }}
-        />
-        {city && (
-          <>
-            <Field
-              label="Place name"
-              maxLength={200}
-              value={term}
-              onChangeText={(text) => {
-                setTerm(text);
-                setPlace(null);
-                setPlaces([]);
-                setError('');
-              }}
-            />
-            <Copy>
-              {place
-                ? `Selected: ${place.name}`
-                : 'Choose a suggestion or use the place name you entered.'}
-            </Copy>
-            {term.trim().length >= 1 && (
-              <Button
-                title={`Use “${term.trim()}”`}
-                secondary
-                onPress={() =>
-                  setPlace({
-                    id: '',
-                    city_id: city.id,
-                    name: term.trim(),
-                    address: '',
-                    category: null,
-                  })
-                }
-              />
-            )}
-            {places.map((item) => (
-              <Button
-                key={item.id}
-                title={[item.name, item.address].filter(Boolean).join(' · ')}
-                secondary
-                onPress={() => setPlace(item)}
-              />
-            ))}
-            {!!error && <Copy error>{error}</Copy>}
-          </>
-        )}
-        <Field label="Notes" value={note} onChangeText={setNote} multiline maxLength={1000} />
+      <Field
+        label="Filter loaded places by name, city or category"
+        value={query}
+        onChangeText={setQuery}
+      />
+      {(['all', 'want_to_go', 'visited'] as const).map((value) => (
         <Button
-          title="Save place"
-          disabled={!city || !place || mutation.busy}
-          onPress={() =>
-            void mutation.run(async () => {
-              if (!city || !place) return;
-              await savePlace(id, city, place, note);
-              setForm(false);
-              setCity(null);
-              setPlace(null);
-              setTerm('');
-              setNote('');
-              await resource.reload();
-            })
-          }
+          key={value}
+          title={`${status === value ? '✓ ' : ''}${value === 'all' ? 'All' : value === 'visited' ? 'Visited' : 'Want to go'}`}
+          secondary
+          onPress={() => setStatus(value)}
         />
-        <Button title="Cancel" secondary disabled={mutation.busy} onPress={() => setForm(false)} />
-      </Sheet>
+      ))}
+      <Button
+        title={map ? 'Show list only' : 'Show map and list'}
+        secondary
+        onPress={() => setMap(!map)}
+      />
+      {map && <WorldMap points={points} onSelect={setSelected} />}
       {resource.loading && <Loading />}
-      {!!resource.error && <Copy error>{resource.error}</Copy>}
-      {resource.data?.length === 0 && <Copy>Your saved places will appear here.</Copy>}
-      {resource.data?.map((item) => (
-        <Card key={item.id}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
-            <View
-              style={{
-                width: 48,
-                height: 48,
-                borderRadius: 16,
-                backgroundColor: colors.soft,
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Coffee size={19} color={colors.tealDeep} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={{ fontFamily: fonts.bold, fontSize: 14, color: colors.ink }}>
-                {item.name}
-              </Text>
-              <Copy>{item.city}</Copy>
-            </View>
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Remove ${item.name} from wish list`}
-              onPress={() => setRemoving(item.id)}
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: 12,
-                backgroundColor: colors.soft,
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-            >
-              <Bookmark size={18} color={colors.tealDeep} fill={colors.soft} />
-            </Pressable>
-          </View>
-          {!!item.note && <Copy>{item.note}</Copy>}
-          {removing === item.id ? (
-            <>
-              <Copy>Remove this place from your wish list?</Copy>
-              <Button
-                title="Confirm removal"
-                disabled={mutation.busy}
-                onPress={() =>
-                  void mutation.run(async () => {
-                    await deleteOwned('saved_places', item.id, id);
-                    setRemoving(null);
-                    await resource.reload();
-                  })
-                }
-              />
-              <Button title="Keep place" secondary onPress={() => setRemoving(null)} />
-            </>
-          ) : null}
+      {!!resource.error && (
+        <>
+          <Copy error>{resource.error}</Copy>
+          <Button title="Retry" secondary onPress={() => void resource.reload()} />
+        </>
+      )}
+      {!resource.loading && filtered.length === 0 && (
+        <Copy>No saved places match. Save a place or change the filters.</Copy>
+      )}
+      {filtered.map((row) => (
+        <Card key={row.id}>
+          <Heading>{row.name}</Heading>
+          <Copy>
+            {row.city} · {row.status === 'visited' ? 'Visited' : 'Want to go'}
+          </Copy>
+          {!!row.note && <Copy>{row.note}</Copy>}
+          {(!row.place || !hasCoordinates(row.place)) && <Copy>Location not set</Copy>}
+          <Button title="Open place" secondary onPress={() => setSelected(row.id)} />
         </Card>
       ))}
+      {resource.data?.length === limit && (
+        <Button
+          title="Load more places"
+          secondary
+          disabled={resource.loading}
+          onPress={() => setLimit(limit + 50)}
+        />
+      )}
+      {form && <SavePlaceSheet onClose={() => setForm(false)} onSaved={resource.reload} />}
+      {item && (
+        <Sheet title="Place details" visible onClose={() => setSelected(null)}>
+          {item.place ? (
+            <PlaceDetails
+              key={item.id}
+              city={{ id: item.city_id, name: item.city, region: '', country_code: null }}
+              place={item.place}
+              saved={item}
+              onChanged={resource.reload}
+            />
+          ) : (
+            <Copy>Place details are unavailable. Refresh and try again.</Copy>
+          )}
+        </Sheet>
+      )}
     </Page>
   );
 }

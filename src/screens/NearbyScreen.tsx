@@ -1,26 +1,34 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { ShieldCheck, Sparkles, Users } from 'lucide-react-native';
 import { useAuth } from '../providers/AuthProvider';
-import { getProfile, listNetworkTrips, listTrips, requestConnection } from '../lib/data';
-import { useMutation, useResource } from '../lib/useResource';
+import { getProfile, listNetworkTrips, listTrips, listConnections } from '../lib/data';
+import { useResource } from '../lib/useResource';
 import { initials, overlappingTrips } from '../lib/travel';
 import { Button, Card, Copy, Loading, Page } from '../components/ui';
+import ConnectionAction from '../components/ConnectionAction';
+import SafetyActions from '../components/SafetyActions';
+import { router } from 'expo-router';
 import { colors, fonts } from '../theme/tokens';
 export default function NearbyScreen() {
   const id = useAuth().session!.user.id;
   const resource = useResource(
     useCallback(async () => {
-      const [profile, own, network] = await Promise.all([
+      const [profile, own, network, connections] = await Promise.all([
         getProfile(id),
         listTrips(id),
         listNetworkTrips(id),
+        listConnections(id),
       ]);
-      return { profile, buddies: overlappingTrips(own, network) };
+      return {
+        profile,
+        connections,
+        buddies: [
+          ...new Map(overlappingTrips(own, network).map((trip) => [trip.user_id, trip])).values(),
+        ],
+      };
     }, [id]),
   );
-  const mutation = useMutation();
-  const [pending, setPending] = useState<string[]>([]);
   return (
     <Page
       title="Buddy nearby"
@@ -50,7 +58,6 @@ export default function NearbyScreen() {
               {new Set(resource.data.buddies.map((b) => b.user_id)).size} possible reunions
             </Text>
           </Card>
-          {!!mutation.error && <Copy error>{mutation.error}</Copy>}
           {resource.data.buddies.length === 0 && (
             <Card>
               <Users color={colors.tealDeep} size={28} />
@@ -78,15 +85,23 @@ export default function NearbyScreen() {
                 <Copy>Your travel dates overlap.</Copy>
               </View>
               <Button
-                title={pending.includes(buddy.user_id) ? 'Request sent' : 'Request to connect'}
-                secondary={pending.includes(buddy.user_id)}
-                disabled={mutation.busy || pending.includes(buddy.user_id)}
-                onPress={() =>
-                  void mutation.run(async () => {
-                    await requestConnection(buddy.user_id);
-                    setPending((current) => [...current, buddy.user_id]);
-                  })
-                }
+                title="View profile"
+                secondary
+                onPress={() => router.push({ pathname: '/member', params: { id: buddy.user_id } })}
+              />
+              <ConnectionAction
+                userId={buddy.user_id}
+                currentUserId={id}
+                connection={resource.data?.connections.find(
+                  (c) => c.sender_id === buddy.user_id || c.recipient_id === buddy.user_id,
+                )}
+                onChanged={resource.reload}
+              />
+              <SafetyActions
+                kind="profile"
+                target={buddy.user_id}
+                userId={buddy.user_id}
+                onChanged={resource.reload}
               />
             </Card>
           ))}

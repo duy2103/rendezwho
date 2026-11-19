@@ -7,11 +7,18 @@ const AuthContext = createContext<{
   session: Session | null;
   loading: boolean;
   error: string | null;
-}>({ session: null, loading: true, error: null });
+  retry: () => void;
+}>({ session: null, loading: true, error: null, retry: () => {} });
 export function AuthProvider({ children }: PropsWithChildren) {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(Boolean(supabase));
   const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const retry = () => {
+    setLoading(Boolean(supabase));
+    setError(null);
+    setAttempt((value) => value + 1);
+  };
   useEffect(() => {
     const client = supabase;
     if (!client) return;
@@ -51,9 +58,11 @@ export function AuthProvider({ children }: PropsWithChildren) {
       listener.remove();
       client.auth.stopAutoRefresh();
     };
-  }, []);
+  }, [attempt]);
   return (
-    <AuthContext.Provider value={{ session, loading, error }}>{children}</AuthContext.Provider>
+    <AuthContext.Provider value={{ session, loading, error, retry }}>
+      {children}
+    </AuthContext.Provider>
   );
 }
 export const useAuth = () => useContext(AuthContext);

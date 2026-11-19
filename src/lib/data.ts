@@ -1,5 +1,23 @@
+import { invitationToken } from './invites';
+import type { Coordinates } from './mapData';
+import { localDate } from './travel';
 import { validateDates } from './validation';
 import { database } from './supabase';
+// Fetch bounded pages with deterministic ordering; do not silently lose older rows.
+async function collectRows<T>(
+  page: (
+    from: number,
+    to: number,
+  ) => PromiseLike<{ data: T[] | null; error: { message: string } | null }>,
+) {
+  const data: T[] = [];
+  for (let offset = 0; ; offset += 250) {
+    const result = await page(offset, offset + 249);
+    if (result.error) throw result.error;
+    data.push(...(result.data ?? []));
+    if (!result.data || result.data.length < 250) return { data, error: null };
+  }
+}
 export type Profile = {
   id: string;
   full_name: string;
@@ -7,7 +25,12 @@ export type Profile = {
   home_city_id: string | null;
   bio: string;
 };
-export type City = { id: string; name: string; country_code: string | null; region: string };
+export type City = Coordinates & {
+  id: string;
+  name: string;
+  country_code: string | null;
+  region: string;
+};
 export type Trip = {
   id: string;
   user_id: string;
@@ -18,14 +41,25 @@ export type Trip = {
   note: string;
   group_ids: string[];
 };
-export type Place = {
+export type Place = Coordinates & {
   id: string;
   city_id: string;
   name: string;
   address: string;
   category: string | null;
 };
-export type SavedPlace = { id: string; user_id: string; city: string; name: string; note: string };
+export type SavedPlace = {
+  id: string;
+  user_id: string;
+  city: string;
+  city_id: string;
+  place_id: string;
+  name: string;
+  note: string;
+  status: 'want_to_go' | 'visited';
+  visited_at: string | null;
+  place: Place | null;
+};
 export type Community = { id: string; owner_id: string; name: string; description: string };
 export type Message = {
   id: string;
@@ -55,7 +89,12 @@ export async function saveProfile(
     throw new Error('Your name must contain 1–100 characters.');
   const { data, error } = await database()
     .from('profiles')
-    .update({ full_name: fullName.trim(), bio: bio.trim(), home_city: city?.name ?? '' })
+    .update({
+      full_name: fullName.trim(),
+      bio: bio.trim(),
+      home_city: city?.name ?? '',
+      home_city_id: city?.id || null,
+    })
     .eq('id', userId)
     .select('id')
     .single();
@@ -65,7 +104,7 @@ export async function saveProfile(
 export async function searchCities(term: string) {
   const { data, error } = await database()
     .from('cities')
-    .select('id,name,country_code,region')
+    .select('id,name,country_code,region,latitude,longitude')
     .ilike('name', `%${term.replace(/[%_]/g, '')}%`)
     .order('name')
     .limit(20);
@@ -73,12 +112,15 @@ export async function searchCities(term: string) {
   return data as City[];
 }
 export async function listTrips(userId: string) {
-  const { data, error } = await database()
-    .from('check_ins')
-    .select('id,user_id,city_id,city,arrival,departure,note')
-    .eq('user_id', userId)
-    .order('arrival', { ascending: false })
-    .limit(100);
+  const { data, error } = await collectRows((from, to) =>
+    database()
+      .from('check_ins')
+      .select('id,user_id,city_id,city,arrival,departure,note')
+      .eq('user_id', userId)
+      .order('arrival', { ascending: false })
+      .order('id')
+      .range(from, to),
+  );
   if (error) throw error;
   if (!data?.length) return [];
   const { data: shares, error: shareError } = await database()
@@ -107,9 +149,10 @@ export async function saveTrip(
 ) {
   validateDates(arrival, departure);
   if (!userId) throw new Error('Sign in required.');
-  const { data, error } = await database().rpc('save_checkin', {
+  if (!city.id) throw new Error('Select a city before saving.');
+  const { data, error } = await database().rpc('maps_save_checkin', {
     checkin_id: id ?? null,
-    city_name: city.name.trim(),
+    location: city.id,
     arrival_date: arrival,
     departure_date: departure,
     trip_note: note.trim(),
@@ -128,20 +171,23 @@ export async function deleteOwned(table: 'check_ins' | 'saved_places', id: strin
   if (error) throw error;
   if (!data?.length) throw new Error('Nothing was deleted. Refresh and check your access.');
 }
-export async function listSaved(userId: string) {
+export async function listSaved(userId: string, limit = 50) {
   const { data, error } = await database()
     .from('saved_places')
-    .select('id,user_id,city,name,note')
+    .select(
+      'id,user_id,city,city_id,place_id,name,note,status,visited_at,place:places!saved_places_place_id_fkey(id,city_id,name,address,category,latitude,longitude)',
+    )
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
-    .limit(100);
+    .order('id')
+    .limit(limit);
   if (error) throw error;
-  return data as SavedPlace[];
+  return data as unknown as SavedPlace[];
 }
 export async function searchPlaces(cityId: string, term: string) {
   const { data, error } = await database()
     .from('places')
-    .select('id,city_id,name,address,category')
+    .select('id,city_id,name,address,category,latitude,longitude')
     .eq('city_id', cityId)
     .ilike('name', `%${term.replace(/[%_]/g, '')}%`)
     .order('name')
@@ -150,14 +196,135 @@ export async function searchPlaces(cityId: string, term: string) {
   return data as Place[];
 }
 export async function savePlace(userId: string, city: City, place: Place, note: string) {
-  if (city.id !== place.city_id) throw new Error('Choose a place in the selected city.');
-  const { error } = await database().from('saved_places').insert({
-    user_id: userId,
-    city: city.name,
-    name: place.name,
-    category: place.category,
-    note: note.trim(),
+  if (!userId || !city.id || city.id !== place.city_id)
+    throw new Error('Choose a place in the selected city.');
+  const { data, error } = await database().rpc('maps_save_place', {
+    location: city.id,
+    place_name: place.name,
+    place_note: note.trim(),
+    existing_place: place.id || null,
+    lat: place.latitude ?? null,
+    lng: place.longitude ?? null,
   });
+  if (error) throw error;
+  return data as string;
+}
+export async function updateSaved(
+  id: string,
+  userId: string,
+  note: string,
+  status: SavedPlace['status'],
+  visitedAt: string | null,
+) {
+  const { error } = await database()
+    .from('saved_places')
+    .update({
+      note: note.trim(),
+      status,
+      visited_at: status === 'visited' ? visitedAt || new Date().toISOString() : null,
+    })
+    .eq('id', id)
+    .eq('user_id', userId)
+    .select('id')
+    .single();
+  if (error) throw error;
+}
+export async function createCity(name: string) {
+  const { data, error } = await database().rpc('maps_save_city', { label: name.trim() });
+  if (error) throw error;
+  return data as City;
+}
+export type SearchResult = Place & {
+  provider_id: string;
+  kind: 'city' | 'place';
+  region: string;
+  country_code: string | null;
+};
+export async function searchLocations(kind: 'city' | 'place', query: string, cityId?: string) {
+  const { data, error } = await database().functions.invoke('search-locations', {
+    body: { kind, query, cityId, language: 'en' },
+  });
+  if (error) {
+    let message = 'External search is unavailable. Try an existing result or a custom place.';
+    try {
+      const body = await error.context?.json();
+      if (body?.error) message = body.error;
+    } catch {
+      /* Keep fallback. */
+    }
+    throw new Error(message);
+  }
+  if (data?.error) throw new Error(data.error);
+  return data as { cacheId: string; results: SearchResult[] };
+}
+export async function importLocation(cacheId: string, resultId: string, cityId?: string) {
+  const { data, error } = await database().rpc('maps_import_result', {
+    cache_id: cacheId,
+    result_id: resultId,
+    location: cityId ?? null,
+  });
+  if (error) throw error;
+  return data as City & Place;
+}
+export type Review = {
+  id: string;
+  user_id: string;
+  community_id: string;
+  rating: number;
+  body: string;
+  created_at: string;
+};
+export async function listReviews(placeId: string) {
+  const { data, error } = await database()
+    .from('reviews')
+    .select('id,user_id,community_id,rating,body,created_at')
+    .eq('place_id', placeId)
+    .order('created_at', { ascending: false })
+    .limit(50);
+  if (error) throw error;
+  return data as Review[];
+}
+export async function saveReview(
+  userId: string,
+  city: City,
+  place: Place,
+  communityId: string,
+  rating: number,
+  body: string,
+  reviewId?: string,
+) {
+  if (
+    !Number.isInteger(rating) ||
+    rating < 1 ||
+    rating > 5 ||
+    !body.trim() ||
+    body.trim().length > 3000
+  )
+    throw new Error('Enter a rating of 1–5 and a review of 1–3,000 characters.');
+  const values = {
+    user_id: userId,
+    city_id: city.id,
+    city: city.name,
+    place_id: place.id,
+    place: place.name,
+    community_id: communityId,
+    rating,
+    body: body.trim(),
+  };
+  const request = reviewId
+    ? database().from('reviews').update(values).eq('id', reviewId).eq('user_id', userId)
+    : database().from('reviews').insert(values);
+  const { error } = await request.select('id').single();
+  if (error) throw error;
+}
+export async function deleteReview(id: string, userId: string) {
+  const { error } = await database()
+    .from('reviews')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', userId)
+    .select('id')
+    .single();
   if (error) throw error;
 }
 export async function listCommunities(userId: string) {
@@ -231,9 +398,8 @@ export async function createCommunity(name: string, description: string) {
   return data as string;
 }
 export async function joinCommunity(token: string) {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token.trim()))
-    throw new Error('Enter the full invitation code.');
-  const { data, error } = await database().rpc('join_community', { invite_token: token.trim() });
+  const code = invitationToken(token);
+  const { data, error } = await database().rpc('join_community', { invite_token: code });
   if (error) throw error;
   return data as string;
 }
@@ -246,12 +412,15 @@ export type Invite = {
   max_uses: number | null;
 };
 export async function listInvites(groupId: string) {
-  const { data, error } = await database()
-    .from('invites')
-    .select('id,token,expires_at,revoked_at,use_count,max_uses')
-    .eq('community_id', groupId)
-    .order('created_at', { ascending: false })
-    .limit(40);
+  const { data, error } = await collectRows((from, to) =>
+    database()
+      .from('invites')
+      .select('id,token,expires_at,revoked_at,use_count,max_uses')
+      .eq('community_id', groupId)
+      .order('created_at', { ascending: false })
+      .order('id')
+      .range(from, to),
+  );
   if (error) throw error;
   return data as Invite[];
 }
@@ -286,12 +455,15 @@ export async function deleteMyAccount() {
 
 export type Member = { user_id: string; role: 'member' | 'moderator'; full_name: string };
 export async function listMembers(groupId: string) {
-  const { data, error } = await database()
-    .from('memberships')
-    .select('user_id,role')
-    .eq('community_id', groupId)
-    .order('joined_at')
-    .limit(100);
+  const { data, error } = await collectRows((from, to) =>
+    database()
+      .from('memberships')
+      .select('user_id,role')
+      .eq('community_id', groupId)
+      .order('joined_at')
+      .order('user_id')
+      .range(from, to),
+  );
   if (error) throw error;
   if (!data?.length) return [];
   const { data: profiles, error: profileError } = await database()
@@ -326,11 +498,15 @@ export type Connection = {
   name: string;
 };
 export async function listConnections(userId: string) {
-  const { data, error } = await database()
-    .from('connections')
-    .select('id,sender_id,recipient_id,status')
-    .order('created_at', { ascending: false })
-    .limit(100);
+  const { data, error } = await collectRows((from, to) =>
+    database()
+      .from('connections')
+      .select('id,sender_id,recipient_id,status')
+      .or(`sender_id.eq.${userId},recipient_id.eq.${userId}`)
+      .order('created_at', { ascending: false })
+      .order('id')
+      .range(from, to),
+  );
   if (error) throw error;
   if (!data?.length) return [];
   const ids = data.map((c) => (c.sender_id === userId ? c.recipient_id : c.sender_id));
@@ -355,16 +531,24 @@ export async function disconnectConnection(connection: string) {
   if (error) throw error;
 }
 
-export type NetworkTrip = Omit<Trip, 'group_ids'> & { full_name: string };
+export type NetworkTrip = Omit<Trip, 'group_ids'> & { full_name: string; location: City | null };
 /** RLS determines visibility; never request precise coordinates or bypass shares. */
-export async function listNetworkTrips(userId: string) {
-  const { data, error } = await database()
+export async function listNetworkTrips(
+  userId: string,
+  fromDate = localDate(),
+  throughDate?: string,
+) {
+  const request = database()
     .from('check_ins')
-    .select('id,user_id,city_id,city,arrival,departure,note')
+    .select(
+      'id,user_id,city_id,city,arrival,departure,note,location:cities!check_ins_city_id_fkey(id,name,country_code,region,latitude,longitude)',
+    )
     .neq('user_id', userId)
-    .gte('departure', new Date().toISOString().slice(0, 10))
+    .gte('departure', fromDate)
     .order('arrival')
-    .limit(100);
+    .order('id');
+  if (throughDate) request.lte('arrival', throughDate);
+  const { data, error } = await collectRows((from, to) => request.range(from, to));
   if (error) throw error;
   if (!data?.length) return [];
   const { data: profiles, error: profileError } = await database()
@@ -375,5 +559,5 @@ export async function listNetworkTrips(userId: string) {
   return data.map((trip) => ({
     ...trip,
     full_name: profiles?.find((p) => p.id === trip.user_id)?.full_name ?? 'Community member',
-  })) as NetworkTrip[];
+  })) as unknown as NetworkTrip[];
 }

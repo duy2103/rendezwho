@@ -1,5 +1,8 @@
-import { useCallback, useState } from 'react';
-import { Text, View } from 'react-native';
+import { router } from 'expo-router';
+import CommunityManagement from '../components/CommunityManagement';
+import SafetyActions from '../components/SafetyActions';
+import { useCallback, useEffect, useState } from 'react';
+import { Text, View, Share } from 'react-native';
 import { Users, Plus, UserPlus } from 'lucide-react-native';
 import { colors, fonts } from '../theme/tokens';
 import Sheet from '../components/Sheet';
@@ -19,6 +22,8 @@ import {
 } from '../lib/data';
 import { useMutation, useResource } from '../lib/useResource';
 import { Button, Card, Copy, Field, Heading, Loading, Page } from '../components/ui';
+import * as Clipboard from 'expo-clipboard';
+import { invitationLink } from '../lib/invites';
 
 function CommunityDetails({
   group,
@@ -39,13 +44,53 @@ function CommunityDetails({
     members.data?.some((m) => m.user_id === userId && m.role === 'moderator');
   const [transferTo, setTransferTo] = useState<string | null>(null);
   const [notice, setNotice] = useState('');
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 30000);
+    return () => clearInterval(timer);
+  }, []);
+  const [copyingInvite, setCopyingInvite] = useState<string | null>(null);
+  async function copyInvite(token: string, inviteId: string, link = false) {
+    setCopyingInvite(inviteId);
+    setNotice('');
+
+    try {
+      const copied = await Clipboard.setStringAsync(link ? invitationLink(token) : token);
+
+      if (!copied) {
+        throw new Error('Clipboard unavailable');
+      }
+
+      setNotice(
+        link
+          ? 'Invitation link copied. Without the app, share the code instead.'
+          : 'Invitation code copied.',
+      );
+    } catch {
+      setNotice('Could not copy the invitation code. Please try again.');
+    } finally {
+      setCopyingInvite(null);
+    }
+  }
   const [leaving, setLeaving] = useState(false);
   return (
     <Card>
       <Heading>{group.name}</Heading>
       <Copy>{group.description}</Copy>
       {!!mutation.error && <Copy error>{mutation.error}</Copy>}
+      <Button title="Community meetups" secondary onPress={() => router.push('/meetups')} />
+      <CommunityManagement
+        group={group}
+        userId={userId}
+        members={members.data ?? []}
+        onChanged={async () => {
+          await Promise.all([onRefresh(), members.reload()]);
+        }}
+        onDeleted={onLeave}
+      />
+      <SafetyActions kind="community" target={group.id} />
       <Copy>Members</Copy>
+      {members.loading && <Loading />}
       {!!notice && <Copy>{notice}</Copy>}
       {!!members.error && <Copy error>{members.error}</Copy>}
       {members.data?.map((member) => (
@@ -65,6 +110,11 @@ function CommunityDetails({
                     setNotice('Connection request sent or already pending/accepted.');
                   })
                 }
+              />
+              <Button
+                title="View profile"
+                secondary
+                onPress={() => router.push({ pathname: '/member', params: { id: member.user_id } })}
               />
               {group.owner_id === userId && (
                 <Button
@@ -90,7 +140,7 @@ function CommunityDetails({
               void mutation.run(async () => {
                 await transferCommunity(group.id, transferTo);
                 setTransferTo(null);
-                await onRefresh();
+                await Promise.all([onRefresh(), members.reload()]);
               })
             }
           />
@@ -116,6 +166,44 @@ function CommunityDetails({
                   value={invite.token}
                   editable={false}
                   selectTextOnFocus
+                />
+                <Button
+                  title={copyingInvite === invite.id ? 'Copying…' : 'Copy invitation code'}
+                  secondary
+                  disabled={
+                    copyingInvite !== null ||
+                    mutation.busy ||
+                    Boolean(invite.expires_at && Date.parse(invite.expires_at) <= now) ||
+                    (invite.max_uses !== null && invite.use_count >= invite.max_uses)
+                  }
+                  onPress={() => void copyInvite(invite.token, invite.id)}
+                />
+                <Button
+                  title="Copy app join link"
+                  secondary
+                  disabled={
+                    copyingInvite !== null ||
+                    mutation.busy ||
+                    !!(invite.expires_at && Date.parse(invite.expires_at) <= now) ||
+                    (invite.max_uses !== null && invite.use_count >= invite.max_uses)
+                  }
+                  onPress={() => void copyInvite(invite.token, invite.id, true)}
+                />
+                <Button
+                  title="Share invitation"
+                  secondary
+                  disabled={
+                    mutation.busy ||
+                    !!(invite.expires_at && Date.parse(invite.expires_at) <= now) ||
+                    (invite.max_uses !== null && invite.use_count >= invite.max_uses)
+                  }
+                  onPress={() =>
+                    void mutation.run(async () => {
+                      await Share.share({
+                        message: `Join ${group.name} on Rendezwho: ${invitationLink(invite.token)}\nInvitation code: ${invite.token}`,
+                      });
+                    })
+                  }
                 />
                 <Copy>
                   {invite.expires_at
@@ -156,7 +244,8 @@ function CommunityDetails({
       ) : leaving ? (
         <>
           <Copy>
-            Leaving removes your trip shares and RSVPs here. Your reviews and hosted meetups remain.
+            Leaving removes your trip shares and RSVPs here. Your upcoming hosted meetups are
+            cancelled. Your reviews remain.
           </Copy>
           <Button
             title="Confirm leave"
@@ -239,6 +328,7 @@ export default function Communities() {
           if (!mutation.busy) setFlow(null);
         }}
       >
+        {!!mutation.error && <Copy error>{mutation.error}</Copy>}
         <Field label="Community name" value={name} onChangeText={setName} maxLength={100} />
         <Field
           label="Description"
@@ -261,7 +351,7 @@ export default function Communities() {
             })
           }
         />
-        <Button title="Cancel" secondary onPress={() => setFlow(null)} />
+        <Button title="Cancel" secondary disabled={mutation.busy} onPress={() => setFlow(null)} />
       </Sheet>
       <Sheet
         title="Join a community"
@@ -270,8 +360,9 @@ export default function Communities() {
           if (!mutation.busy) setFlow(null);
         }}
       >
+        {!!mutation.error && <Copy error>{mutation.error}</Copy>}
         <Field
-          label="Invitation code"
+          label="Invitation code or app link"
           value={token}
           onChangeText={setToken}
           autoCapitalize="none"
@@ -290,7 +381,7 @@ export default function Communities() {
             })
           }
         />
-        <Button title="Cancel" secondary onPress={() => setFlow(null)} />
+        <Button title="Cancel" secondary disabled={mutation.busy} onPress={() => setFlow(null)} />
       </Sheet>
       {resource.loading && <Loading />}
       {!!resource.error && <Copy error>{resource.error}</Copy>}

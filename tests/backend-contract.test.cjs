@@ -7,7 +7,14 @@ const vm = require('node:vm');
 const ts = require('typescript');
 function loadModule(name, imports) {
   const source = fs.readFileSync(path.join(__dirname, '../src/lib', name + '.ts'), 'utf8');
-  const context = { exports: {}, require: (id) => imports[id], Date, Set };
+  const context = {
+    exports: {},
+    require: (id) => imports[id],
+    Date,
+    Set,
+    URL,
+    process: { env: {} },
+  };
   vm.runInNewContext(
     ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS } }).outputText,
     context,
@@ -17,7 +24,23 @@ function loadModule(name, imports) {
 function setup(result = { data: { id: 'saved' }, error: null }) {
   const calls = [];
   const chain = { then: (ok, fail) => Promise.resolve(result).then(ok, fail) };
-  for (const method of ['from', 'update', 'insert', 'upsert', 'eq', 'select', 'single', 'rpc']) {
+  for (const method of [
+    'from',
+    'update',
+    'insert',
+    'upsert',
+    'eq',
+    'select',
+    'single',
+    'rpc',
+    'neq',
+    'gte',
+    'lte',
+    'order',
+    'limit',
+    'range',
+    'or',
+  ]) {
     chain[method] = (...args) => {
       calls.push([method, ...JSON.parse(JSON.stringify(args))]);
       return chain;
@@ -26,16 +49,20 @@ function setup(result = { data: { id: 'saved' }, error: null }) {
   const api = loadModule('data', {
     './supabase': { database: () => chain },
     './validation': loadModule('validation', {}),
+    './invites': loadModule('invites', {}),
   });
   return { api, calls };
 }
-const city = { id: '', name: 'Berlin, Germany', country_code: null, region: '' };
+const city = { id: 'city-a', name: 'Berlin, Germany', country_code: null, region: '' };
 test('profile writes update only editable columns; signup trigger owns creation', async () => {
   const { api, calls } = setup();
   await api.saveProfile('user-a', ' Ada ', ' Hello ', city);
   assert.deepEqual(calls, [
     ['from', 'profiles'],
-    ['update', { full_name: 'Ada', bio: 'Hello', home_city: 'Berlin, Germany' }],
+    [
+      'update',
+      { full_name: 'Ada', bio: 'Hello', home_city: 'Berlin, Germany', home_city_id: 'city-a' },
+    ],
     ['eq', 'id', 'user-a'],
     ['select', 'id'],
     ['single'],
@@ -51,10 +78,10 @@ test('trip and sharing go through a single atomic RPC with explicit private grou
   assert.deepEqual(calls, [
     [
       'rpc',
-      'save_checkin',
+      'maps_save_checkin',
       {
         checkin_id: null,
-        city_name: city.name,
+        location: city.id,
         arrival_date: '2026-12-01',
         departure_date: '2026-12-02',
         trip_note: 'note',
@@ -74,17 +101,27 @@ test('invalid trip dates never reach the backend', async () => {
   await assert.rejects(api.saveTrip('user-a', city, '2026-02-30', '2026-03-01', ''));
   assert.equal(calls.length, 0);
 });
-test('place insertion lets the location trigger supply UUIDs', async () => {
+test('saving a place passes canonical IDs through the atomic RPC', async () => {
   const { api, calls } = setup();
   await api.savePlace(
     'user-a',
     city,
-    { id: '', city_id: '', name: 'Cafe', category: null },
+    { id: 'place-a', city_id: 'city-a', name: 'Cafe', category: null },
     'hello',
   );
   assert.deepEqual(calls, [
-    ['from', 'saved_places'],
-    ['insert', { user_id: 'user-a', city: city.name, name: 'Cafe', category: null, note: 'hello' }],
+    [
+      'rpc',
+      'maps_save_place',
+      {
+        location: 'city-a',
+        place_name: 'Cafe',
+        place_note: 'hello',
+        existing_place: 'place-a',
+        lat: null,
+        lng: null,
+      },
+    ],
   ]);
 });
 test('account deletion never implicitly deletes owned communities', async () => {
@@ -96,4 +133,11 @@ test('malformed invite codes are rejected without an RPC', async () => {
   const { api, calls } = setup();
   await assert.rejects(api.joinCommunity('not-a-token'), /invitation code/);
   assert.equal(calls.length, 0);
+});
+
+test('map date-range queries include historical overlaps instead of applying a today cutoff', async () => {
+  const { api, calls } = setup({ data: [], error: null });
+  await api.listNetworkTrips('user-a', '2025-01-01', '2025-01-31');
+  assert.ok(calls.some((c) => c[0] === 'gte' && c[1] === 'departure' && c[2] === '2025-01-01'));
+  assert.ok(calls.some((c) => c[0] === 'lte' && c[1] === 'arrival' && c[2] === '2025-01-31'));
 });

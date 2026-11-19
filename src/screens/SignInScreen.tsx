@@ -23,10 +23,11 @@ export default function SignInScreen() {
     await signInWithProvider(provider);
   }
   const openLegal = (url: string | undefined) => {
-    if (url)
-      void mutation.run(async () => {
-        await Linking.openURL(url);
-      });
+    void mutation.run(async () => {
+      if (!url || !url.startsWith('https://'))
+        throw new Error('This page is not available yet. Please try again later.');
+      await Linking.openURL(url);
+    });
   };
   return (
     <SafeAreaView style={s.screen}>

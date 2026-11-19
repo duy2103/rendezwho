@@ -1,0 +1,9 @@
+project_id = "rendezwho-app"
+
+[functions.search-locations]
+# The handler verifies the bearer token with Supabase Auth before any work.
+verify_jwt = false
+
+[functions.deliver-notifications]
+# Worker uses its own required secret; never a public/mobile credential.
+verify_jwt = false

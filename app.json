@@ -13,12 +13,21 @@
       }
     },
     "android": {
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.duyvu2103.rendezwhoapp"
     },
     "plugins": [
       "expo-router",
       "expo-web-browser",
-      "expo-font"
+      "expo-font",
+      "@maplibre/maplibre-react-native",
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Allow Rendezwho to center the map on your location. Your precise location is not shared."
+        }
+      ],
+      "expo-notifications"
     ],
     "scheme": "rendezwho",
     "extra": {
@@ -30,6 +39,7 @@
       "eas": {
         "projectId": "4e4bf8b5-1af0-448a-b90f-89705fcec3fa"
       }
-    }
+    },
+    "icon": "./assets/brand/app-icon.png"
   }
 }

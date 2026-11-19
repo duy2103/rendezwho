@@ -1,4 +1,7 @@
-import { useState } from 'react';
+import { unreadCount } from '../lib/social';
+import { useResource } from '../lib/useResource';
+import { useLiveRefresh } from '../lib/useLiveRefresh';
+import { useCallback, useState } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { router } from 'expo-router';
 import { Bell, Plus, X, MessageCircle, UserRound } from 'lucide-react-native';
@@ -8,6 +11,10 @@ import { colors, fonts } from '../theme/tokens';
 export default function AppHeader() {
   const { session } = useAuth();
   const [open, setOpen] = useState(false);
+  const unread = useResource(
+    useCallback(() => (session ? unreadCount() : Promise.resolve(0)), [session]),
+  );
+  useLiveRefresh('app_notifications', unread.reload);
   if (!session) return null;
   return (
     <View style={s.header}>
@@ -28,6 +35,11 @@ export default function AppHeader() {
           style={s.icon}
         >
           <Bell size={19} color={colors.tealDeep} />
+          {!!unread.data && (
+            <Text accessibilityLabel={`${unread.data} unread notifications`} style={s.itemText}>
+              {unread.data > 99 ? '99+' : unread.data}
+            </Text>
+          )}
         </Pressable>
         <Pressable
           accessibilityRole="button"
@@ -56,6 +68,27 @@ export default function AppHeader() {
               <X size={18} color={colors.muted} />
             </View>
             <Text style={s.copy}>Keep in touch with your travel network.</Text>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                setOpen(false);
+                router.push('/notifications');
+              }}
+              style={s.menuItem}
+            >
+              <Bell size={18} color={colors.tealDeep} />
+              <Text style={s.itemText}>View notifications</Text>
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              onPress={() => {
+                setOpen(false);
+                router.push('/meetups');
+              }}
+              style={s.menuItem}
+            >
+              <Text style={s.itemText}>Community meetups</Text>
+            </Pressable>
             <Pressable
               accessibilityRole="button"
               onPress={() => {

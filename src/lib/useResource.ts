@@ -13,12 +13,14 @@ export function useResource<T>(load: () => Promise<T>) {
       const next = await load();
       if (request === sequence.current) setData(next);
     } catch (e) {
-      if (request === sequence.current)
+      if (request === sequence.current) {
+        setData(null);
         setError(
           e instanceof Error
             ? e.message
             : String((e as { message?: string })?.message ?? 'Could not load data.'),
         );
+      }
     } finally {
       if (request === sequence.current) setLoading(false);
     }
