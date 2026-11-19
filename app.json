@@ -24,7 +24,7 @@
       [
         "expo-location",
         {
-          "locationWhenInUsePermission": "Allow Rendezwho to center the map on your location. Your precise location is not shared."
+          "locationWhenInUsePermission": "Allow Rendezwho to suggest your current city. Only an approximate area is used for lookup; your device location is not saved or shared with people."
         }
       ],
       "expo-notifications"

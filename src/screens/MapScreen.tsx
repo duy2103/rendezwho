@@ -1,7 +1,7 @@
 import ConnectionAction from '../components/ConnectionAction';
 import SafetyActions from '../components/SafetyActions';
 import { useCallback, useMemo, useState } from 'react';
-import * as Location from 'expo-location';
+import CityPicker from '../components/CityPicker';
 import { useAuth } from '../providers/AuthProvider';
 import { listNetworkTrips, listSaved, listConnections, type City } from '../lib/data';
 import { cityPoints, hasCoordinates, type MapPoint } from '../lib/mapData';
@@ -25,6 +25,8 @@ export default function MapScreen() {
   const [selected, setSelected] = useState<string | null>(null);
   const [adding, setAdding] = useState(false);
   const [addingCity, setAddingCity] = useState<City | undefined>();
+  const [locatingCity, setLocatingCity] = useState(false);
+  const [currentCity, setCurrentCity] = useState<City | null>(null);
   const [center, setCenter] = useState<[number, number] | undefined>();
   const rangeError = useMemo(() => {
     if (mode !== 'range') return '';
@@ -130,35 +132,34 @@ export default function MapScreen() {
           </Copy>
         </>
       )}
-      <WorldMap points={points} center={center} onSelect={setSelected} />
-      <Button
-        title="Center on me"
-        secondary
-        disabled={mutation.busy}
-        onPress={() =>
-          void mutation.run(async () => {
-            const permission = await Location.requestForegroundPermissionsAsync();
-            if (permission.status !== 'granted')
-              throw new Error('Location permission was not granted. You can still browse cities.');
-            const position = await Location.getCurrentPositionAsync({
-              accuracy: Location.Accuracy.Balanced,
-            });
-            setCenter([position.coords.longitude, position.coords.latitude]);
-          })
-        }
-      />
+      {!adding && <WorldMap points={points} center={center} onSelect={setSelected} />}
+      <Button title="Use current city" secondary onPress={() => setLocatingCity(true)} />
+      {currentCity && <Copy>Selected city: {currentCity.name}</Copy>}
+      {locatingCity && (
+        <Sheet title="Choose your current city" visible onClose={() => setLocatingCity(false)}>
+          <CityPicker
+            value={null}
+            onChange={(chosen) => {
+              if (!chosen) return;
+              setCurrentCity(chosen);
+              if (hasCoordinates(chosen)) setCenter([chosen.longitude, chosen.latitude]);
+              setLocatingCity(false);
+            }}
+          />
+        </Sheet>
+      )}
       {!!mutation.error && <Copy error>{mutation.error}</Copy>}
       <Button
         title="Find and save a place"
         onPress={() => {
-          setAddingCity(undefined);
+          setAddingCity(currentCity ?? undefined);
           setAdding(true);
         }}
       />
       {(resource.loading || saved.loading) && <Loading />}
       {!!resource.error && <Copy error>{resource.error}</Copy>}
       {!!saved.error && <Copy error>{saved.error}</Copy>}
-      {(resource.error || saved.error) && (
+      {!!(resource.error || saved.error) && (
         <Button title="Retry" secondary onPress={() => void reload()} />
       )}
       {layer === 'people' && (

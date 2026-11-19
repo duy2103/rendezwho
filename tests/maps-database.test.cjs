@@ -62,6 +62,12 @@ async function setup() {
   const db = new PGlite();
   await db.exec(fixture);
   await db.exec(migration);
+  await db.exec(
+    fs.readFileSync(
+      path.join(__dirname, '../supabase/migrations/202611190001_google_places_fallback.sql'),
+      'utf8',
+    ),
+  );
   return db;
 }
 async function as(db, user) {
@@ -261,6 +267,62 @@ test('two users can explicitly choose the same custom city without sharing priva
       [second],
     );
     assert.equal((await db.query('select * from places')).rows.length, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('Google bookmarks store only references and user labels, with private ownership', async () => {
+  const db = await setup();
+  try {
+    await as(db, A);
+    const c = await city(db);
+    await db.exec('reset role');
+    await db.query(
+      "insert into maps_search_cache values('google:test', $1::jsonb, now()+interval '10 minutes')",
+      [JSON.stringify({ results: [{ provider_id: 'google:ChIJ_test', city_id: c }] })],
+    );
+    await as(db, A);
+    const result = await db.query(
+      "select maps_save_google_place('google:test','google:ChIJ_test',$1,'My cafe','Meet here') id",
+      [c],
+    );
+    const row = (
+      await db.query(
+        'select p.* from places p join saved_places s on s.place_id=p.id where s.id=$1',
+        [result.rows[0].id],
+      )
+    ).rows[0];
+    assert.equal(row.name, 'My cafe');
+    assert.equal(row.google_place_id, 'ChIJ_test');
+    assert.equal(row.latitude, null);
+    assert.equal(row.longitude, null);
+    assert.ok(!row.address);
+    assert.equal(
+      (
+        await db.query(
+          "select maps_save_google_place('google:test','google:ChIJ_test',$1,'Duplicate','') id",
+          [c],
+        )
+      ).rows[0].id,
+      result.rows[0].id,
+    );
+    await assert.rejects(
+      db.query("select maps_save_google_place('google:test','google:forged',$1,'Fake','')", [c]),
+      /Search again/,
+    );
+    await as(db, B);
+    assert.equal((await db.query('select * from places where id=$1', [row.id])).rows.length, 0);
+    await assert.rejects(db.query('select maps_take_google_budget(4500)'), /permission denied/);
+    await db.exec('reset role; set role service_role');
+    assert.equal(
+      (await db.query('select maps_take_google_budget(1) allowed')).rows[0].allowed,
+      true,
+    );
+    assert.equal(
+      (await db.query('select maps_take_google_budget(1) allowed')).rows[0].allowed,
+      false,
+    );
   } finally {
     await db.close();
   }

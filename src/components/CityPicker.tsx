@@ -7,6 +7,7 @@ import {
   type City,
   type SearchResult,
 } from '../lib/data';
+import { findCurrentCities } from '../lib/currentCity';
 import { useMutation } from '../lib/useResource';
 import { Button, Copy, Field, Loading } from './ui';
 export default function CityPicker({
@@ -74,6 +75,27 @@ export default function CityPicker({
     );
   return (
     <>
+      <Button
+        title={mutation.busy ? 'Working…' : 'Use current city'}
+        secondary
+        disabled={mutation.busy}
+        onPress={() =>
+          void mutation.run(async () => {
+            const request = ++sequence.current;
+            setTerm('');
+            setLoading(false);
+            setResults([]);
+            setExternal(null);
+            setError('');
+            const response = await findCurrentCities();
+            if (request === sequence.current) setExternal(response);
+          })
+        }
+      />
+      <Copy>
+        Choose your city from the suggestions. Only an approximate area is sent for lookup; your
+        device location is not saved or shared with people.
+      </Copy>
       <Field
         label="City and country"
         value={term}

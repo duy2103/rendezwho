@@ -1,12 +1,16 @@
+import { Linking, Text, View } from 'react-native';
 import { useEffect, useRef, useState } from 'react';
 import {
   importLocation,
   savePlace,
+  saveGooglePlace,
+  googlePlaceUrl,
   searchLocations,
   searchPlaces,
   type City,
   type Place,
   type SearchResult,
+  type SearchResponse,
 } from '../lib/data';
 import { hasCoordinates } from '../lib/mapData';
 import { useMutation } from '../lib/useResource';
@@ -29,9 +33,9 @@ export default function SavePlaceSheet({
   const [term, setTerm] = useState('');
   const [place, setPlace] = useState<Place | null>(null);
   const [results, setResults] = useState<Place[]>([]);
-  const [external, setExternal] = useState<{ cacheId: string; results: SearchResult[] } | null>(
-    null,
-  );
+  const [external, setExternal] = useState<SearchResponse | null>(null);
+  const [google, setGoogle] = useState<SearchResult | null>(null);
+  const [label, setLabel] = useState('');
   const [note, setNote] = useState('');
   const [pin, setPin] = useState<[number, number] | null>(null);
   const [custom, setCustom] = useState(false);
@@ -54,7 +58,7 @@ export default function SavePlaceSheet({
         .finally(() => {
           if (active) setLoading(false);
         });
-    }, 300);
+    }, 800);
     return () => {
       active = false;
       clearTimeout(timer);
@@ -69,6 +73,7 @@ export default function SavePlaceSheet({
   function resetResults() {
     sequence.current++;
     setPlace(null);
+    setGoogle(null);
     setResults([]);
     setExternal(null);
     setCustom(false);
@@ -96,9 +101,10 @@ export default function SavePlaceSheet({
       {city && (
         <>
           <Field
-            label="Place name"
+            label="Search for a place"
+            placeholder="Café, restaurant, or place name"
             value={term}
-            maxLength={200}
+            maxLength={150}
             editable={!mutation.busy}
             onChangeText={(text) => {
               setTerm(text);
@@ -113,18 +119,23 @@ export default function SavePlaceSheet({
               secondary
               disabled={mutation.busy}
               onPress={() => {
+                setGoogle(null);
                 setPlace(item);
                 setCustom(false);
               }}
             />
           ))}
           <Button
-            title="Search more places near this city"
+            title={mutation.busy ? 'Searching…' : 'Search places'}
             secondary
-            disabled={mutation.busy || term.trim().length < 2 || !hasCoordinates(city)}
+            disabled={mutation.busy || loading || term.trim().length < 2 || !hasCoordinates(city)}
             onPress={() =>
               void mutation.run(async () => {
                 const request = ++sequence.current;
+                setGoogle(null);
+                setExternal(null);
+                setCustom(false);
+                setError('');
                 const response = await searchLocations('place', term, city.id);
                 if (request === sequence.current) setExternal(response);
               })
@@ -136,29 +147,84 @@ export default function SavePlaceSheet({
               custom place.
             </Copy>
           )}
+          {external?.provider === 'google' && (
+            <Copy>No OpenStreetMap matches available. Results below are from Google Maps.</Copy>
+          )}
           {external?.results.map((item) => (
-            <Button
-              key={item.provider_id}
-              title={[item.name, item.address].filter(Boolean).join(' · ')}
-              secondary
-              disabled={mutation.busy}
-              onPress={() =>
-                void mutation.run(async () => {
-                  setPlace(await importLocation(external.cacheId, item.provider_id, city.id));
-                  setCustom(false);
-                })
-              }
-            />
+            <View key={item.provider_id} style={{ gap: 8 }}>
+              <Button
+                title={[item.name, item.address].filter(Boolean).join(' · ')}
+                secondary
+                disabled={mutation.busy}
+                onPress={() =>
+                  void mutation.run(async () => {
+                    if (external.provider === 'google') {
+                      setPlace(null);
+                      setGoogle(item);
+                      setLabel(term.trim());
+                    } else {
+                      setGoogle(null);
+                      setPlace(await importLocation(external.cacheId, item.provider_id, city.id));
+                    }
+                    setCustom(false);
+                  })
+                }
+              />
+              {item.attributions?.map((attribution, index) => (
+                <Text
+                  key={index}
+                  onPress={
+                    attribution.uri ? () => void Linking.openURL(attribution.uri!) : undefined
+                  }
+                >
+                  {attribution.provider}
+                </Text>
+              ))}
+            </View>
           ))}
           {external?.results.length === 0 && (
-            <Copy>No results. Try a different name or add a custom place.</Copy>
+            <Copy>
+              No matching places found. Try just the business name without its address. Some
+              businesses are not listed; you can add a private custom place.
+            </Copy>
           )}
-          {external && <Copy>Results near this city · © OpenStreetMap contributors (ODbL).</Copy>}
+          {!!external?.notice && <Copy>{external.notice}</Copy>}
+          {external &&
+            (external.provider === 'google' ? (
+              <Text style={{ fontSize: 14, color: '#5E5E5E', fontWeight: '400' }}>Google Maps</Text>
+            ) : (
+              <Copy>Results near this city · © OpenStreetMap contributors (ODbL).</Copy>
+            ))}
+          {google && (
+            <>
+              <Copy>
+                Selected: {google.name}. Save a Google Maps link with your own label; this bookmark
+                will not have a pin on the map.
+              </Copy>
+              <Field
+                label="Your bookmark label"
+                value={label}
+                onChangeText={setLabel}
+                maxLength={200}
+              />
+              <Button
+                title="Open in Google Maps"
+                secondary
+                onPress={() =>
+                  void mutation.run(async () => {
+                    await Linking.openURL(googlePlaceUrl(google.provider_id.slice(7)));
+                  })
+                }
+              />
+            </>
+          )}
           <Button
             title="Add a private custom place"
             secondary
             disabled={!term.trim() || mutation.busy}
             onPress={() => {
+              setGoogle(null);
+              setExternal(null);
               setCustom(true);
               setPlace(null);
             }}
@@ -210,9 +276,17 @@ export default function SavePlaceSheet({
           />
           <Button
             title={mutation.busy ? 'Saving…' : 'Save place'}
-            disabled={mutation.busy || (!place && !custom)}
+            disabled={
+              mutation.busy || (!place && !custom && !google) || (!!google && !label.trim())
+            }
             onPress={() =>
               void mutation.run(async () => {
+                if (google && external) {
+                  await saveGooglePlace(external.cacheId, google.provider_id, city.id, label, note);
+                  await onSaved();
+                  onClose();
+                  return;
+                }
                 const chosen = place ?? {
                   id: '',
                   city_id: city.id,

@@ -3,6 +3,7 @@ import { useCallback, useState } from 'react';
 import { Linking } from 'react-native';
 import {
   deleteOwned,
+  googlePlaceUrl,
   deleteReview,
   listCommunities,
   listReviews,
@@ -57,7 +58,17 @@ export default function PlaceDetails({
       {!!place.category && <Copy>{place.category}</Copy>}
       {!!mutation.error && <Copy error>{mutation.error}</Copy>}
       {!!notice && <Copy>{notice}</Copy>}
-      {hasCoordinates(place) ? (
+      {place.google_place_id ? (
+        <Button
+          title="Open in Google Maps"
+          secondary
+          onPress={() =>
+            void mutation.run(async () => {
+              await Linking.openURL(googlePlaceUrl(place.google_place_id!));
+            })
+          }
+        />
+      ) : hasCoordinates(place) ? (
         <Button
           title="Directions in OpenStreetMap"
           secondary

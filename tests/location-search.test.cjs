@@ -6,15 +6,28 @@ const path = require('node:path');
 const vm = require('node:vm');
 const ts = require('typescript');
 const { webcrypto } = require('node:crypto');
-function setup({ authenticated = true, allowed = true, cached = null, upstreamOk = true } = {}) {
+function setup({
+  authenticated = true,
+  allowed = true,
+  cached = null,
+  upstreamOk = true,
+  empty = false,
+  googleEnabled = false,
+  googleAllowed = true,
+  googleOk = true,
+} = {}) {
   let handler;
   let fetches = 0;
   const writes = [];
+  const urls = [];
   const db = {
     auth: {
       getUser: async () => ({ data: { user: authenticated ? { id: 'user' } : null }, error: null }),
     },
-    rpc: async () => ({ data: allowed, error: null }),
+    rpc: async (name) => ({
+      data: name === 'maps_take_google_budget' ? googleAllowed : allowed,
+      error: null,
+    }),
     from: () => {
       const chain = {
         select() {
@@ -26,6 +39,10 @@ function setup({ authenticated = true, allowed = true, cached = null, upstreamOk
         gt() {
           return chain;
         },
+        single: async () => ({
+          data: { id: 'city', latitude: 52.5, longitude: 13.4 },
+          error: null,
+        }),
         maybeSingle: async () => ({ data: cached ? { payload: cached } : null, error: null }),
         upsert: async (value) => {
           writes.push(value);
@@ -45,6 +62,8 @@ function setup({ authenticated = true, allowed = true, cached = null, upstreamOk
             SUPABASE_URL: 'https://project.example',
             SUPABASE_SERVICE_ROLE_KEY: 'test',
             MAPS_SEARCH_ENABLED: 'true',
+            GOOGLE_PLACES_ENABLED: googleEnabled ? 'true' : 'false',
+            GOOGLE_PLACES_API_KEY: 'server-key',
           })[key],
       },
       serve: (fn) => {
@@ -57,31 +76,50 @@ function setup({ authenticated = true, allowed = true, cached = null, upstreamOk
     AbortSignal,
     crypto: webcrypto,
     Set,
-    fetch: async () => {
+    fetch: async (url) => {
+      urls.push(new URL(url));
       fetches++;
+      if (String(url).includes('places.googleapis.com'))
+        return {
+          ok: googleOk,
+          json: async () => ({
+            places: [
+              {
+                id: 'ChIJ_test',
+                displayName: { text: 'Google cafe' },
+                formattedAddress: 'Private provider address',
+                attributions: [],
+              },
+            ],
+          }),
+        };
       return {
         ok: upstreamOk,
         json: async () => ({
-          features: [
-            {
-              geometry: { coordinates: [13.4, 52.5] },
-              properties: {
-                osm_type: 'N',
-                osm_id: 1,
-                name: 'Berlin',
-                countrycode: 'de',
-                country: 'Germany',
-              },
-            },
-            {
-              geometry: { coordinates: [200, 52] },
-              properties: { osm_type: 'N', osm_id: 2, name: 'Bad' },
-            },
-            {
-              geometry: { coordinates: [13.4, 52.5] },
-              properties: { osm_type: 'N', osm_id: 1, name: 'Duplicate' },
-            },
-          ],
+          features: empty
+            ? []
+            : [
+                {
+                  geometry: { coordinates: [13.4, 52.5] },
+                  properties: {
+                    osm_type: 'N',
+                    osm_id: 1,
+                    name: 'Berlin',
+                    osm_key: 'place',
+                    osm_value: 'city',
+                    countrycode: 'de',
+                    country: 'Germany',
+                  },
+                },
+                {
+                  geometry: { coordinates: [200, 52] },
+                  properties: { osm_type: 'N', osm_id: 2, name: 'Bad' },
+                },
+                {
+                  geometry: { coordinates: [13.4, 52.5] },
+                  properties: { osm_type: 'N', osm_id: 1, name: 'Duplicate' },
+                },
+              ],
         }),
       };
     },
@@ -107,6 +145,7 @@ function setup({ authenticated = true, allowed = true, cached = null, upstreamOk
       ),
     fetches: () => fetches,
     writes,
+    urls,
   };
 }
 test('search requires a verified user before querying upstream', async () => {
@@ -136,4 +175,68 @@ test('upstream failure does not poison the cache', async () => {
   const s = setup({ upstreamOk: false });
   assert.equal((await s.call({ kind: 'city', query: 'Berlin' })).status, 503);
   assert.equal(s.writes.length, 0);
+});
+
+test('current-city lookup rounds coordinates and only caches city results', async () => {
+  const s = setup();
+  const response = await s.call({
+    kind: 'city',
+    nearby: { latitude: 52.512345, longitude: 13.412345 },
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.results.length, 1);
+  assert.equal(body.results[0].kind, 'city');
+  assert.equal(s.urls[0].pathname, '/reverse');
+  assert.equal(s.urls[0].searchParams.get('lat'), '52.5');
+  assert.equal(s.urls[0].searchParams.get('lon'), '13.4');
+  assert.equal(s.urls[0].searchParams.has('q'), false);
+  assert.equal(JSON.stringify(s.writes).includes('52.512345'), false);
+});
+test('invalid current-city coordinates never reach the provider', async () => {
+  for (const latitude of [91, '52', null]) {
+    const s = setup();
+    assert.equal((await s.call({ kind: 'city', nearby: { latitude, longitude: 13 } })).status, 400);
+    assert.equal(s.fetches(), 0);
+  }
+});
+
+test('OSM matches never spend Google requests', async () => {
+  const s = setup({ googleEnabled: true });
+  const body = await (await s.call({ kind: 'place', query: 'Cafe', cityId: 'city' })).json();
+  assert.equal(body.provider, 'osm');
+  assert.equal(s.fetches(), 1);
+});
+test('empty OSM results fall back, while Google display content is never cached', async () => {
+  const s = setup({ googleEnabled: true, empty: true });
+  const body = await (await s.call({ kind: 'place', query: 'Cafe', cityId: 'city' })).json();
+  assert.equal(body.provider, 'google');
+  assert.equal(body.results[0].name, 'Google cafe');
+  assert.equal(body.results[0].latitude, null);
+  assert.equal(s.fetches(), 2);
+  const stored = JSON.stringify(s.writes);
+  assert.equal(stored.includes('Google cafe'), false);
+  assert.equal(stored.includes('Private provider address'), false);
+  assert.equal(stored.includes('google:ChIJ_test'), true);
+});
+test('Google budget or disabled provider prevents paid requests', async () => {
+  for (const options of [{ googleEnabled: false }, { googleEnabled: true, googleAllowed: false }]) {
+    const s = setup({ ...options, empty: true });
+    const body = await (await s.call({ kind: 'place', query: 'Cafe', cityId: 'city' })).json();
+    assert.equal(body.results.length, 0);
+    assert.ok(body.notice);
+    assert.equal(s.fetches(), 1);
+  }
+});
+test('cached OSM misses still allow Google fallback and provider failure is recoverable', async () => {
+  const s = setup({ googleEnabled: true, cached: { results: [] } });
+  assert.equal(
+    (await (await s.call({ kind: 'place', query: 'Cafe', cityId: 'city' })).json()).provider,
+    'google',
+  );
+  assert.equal(s.fetches(), 1);
+  const failure = setup({ googleEnabled: true, upstreamOk: false, googleOk: false });
+  const body = await (await failure.call({ kind: 'place', query: 'Cafe', cityId: 'city' })).json();
+  assert.ok(body.notice);
+  assert.equal(failure.writes.length, 0);
 });

@@ -42,6 +42,7 @@ export type Trip = {
   group_ids: string[];
 };
 export type Place = Coordinates & {
+  google_place_id?: string | null;
   id: string;
   city_id: string;
   name: string;
@@ -175,7 +176,7 @@ export async function listSaved(userId: string, limit = 50) {
   const { data, error } = await database()
     .from('saved_places')
     .select(
-      'id,user_id,city,city_id,place_id,name,note,status,visited_at,place:places!saved_places_place_id_fkey(id,city_id,name,address,category,latitude,longitude)',
+      'id,user_id,city,city_id,place_id,name,note,status,visited_at,place:places!saved_places_place_id_fkey(id,city_id,name,address,category,latitude,longitude,google_place_id)',
     )
     .eq('user_id', userId)
     .order('created_at', { ascending: false })
@@ -187,7 +188,7 @@ export async function listSaved(userId: string, limit = 50) {
 export async function searchPlaces(cityId: string, term: string) {
   const { data, error } = await database()
     .from('places')
-    .select('id,city_id,name,address,category,latitude,longitude')
+    .select('id,city_id,name,address,category,latitude,longitude,google_place_id')
     .eq('city_id', cityId)
     .ilike('name', `%${term.replace(/[%_]/g, '')}%`)
     .order('name')
@@ -234,15 +235,27 @@ export async function createCity(name: string) {
   if (error) throw error;
   return data as City;
 }
+export type SearchResponse = {
+  cacheId: string;
+  results: SearchResult[];
+  provider?: 'osm' | 'google';
+  notice?: string;
+};
 export type SearchResult = Place & {
+  attributions?: { provider: string; uri: string | null }[];
   provider_id: string;
   kind: 'city' | 'place';
   region: string;
   country_code: string | null;
 };
-export async function searchLocations(kind: 'city' | 'place', query: string, cityId?: string) {
+export async function searchLocations(
+  kind: 'city' | 'place',
+  query: string,
+  cityId?: string,
+  nearby?: { latitude: number; longitude: number },
+) {
   const { data, error } = await database().functions.invoke('search-locations', {
-    body: { kind, query, cityId, language: 'en' },
+    body: { kind, query, cityId, nearby, language: 'en' },
   });
   if (error) {
     let message = 'External search is unavailable. Try an existing result or a custom place.';
@@ -255,7 +268,27 @@ export async function searchLocations(kind: 'city' | 'place', query: string, cit
     throw new Error(message);
   }
   if (data?.error) throw new Error(data.error);
-  return data as { cacheId: string; results: SearchResult[] };
+  return data as SearchResponse;
+}
+export async function saveGooglePlace(
+  cacheId: string,
+  resultId: string,
+  cityId: string,
+  label: string,
+  note: string,
+) {
+  const { data, error } = await database().rpc('maps_save_google_place', {
+    cache_id: cacheId,
+    result_id: resultId,
+    location: cityId,
+    place_label: label.trim(),
+    place_note: note.trim(),
+  });
+  if (error) throw error;
+  return data as string;
+}
+export function googlePlaceUrl(id: string) {
+  return `https://www.google.com/maps/search/?api=1&query=place&query_place_id=${encodeURIComponent(id)}`;
 }
 export async function importLocation(cacheId: string, resultId: string, cityId?: string) {
   const { data, error } = await database().rpc('maps_import_result', {

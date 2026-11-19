@@ -74,7 +74,7 @@ export default function Saved() {
         secondary
         onPress={() => setMap(!map)}
       />
-      {map && <WorldMap points={points} onSelect={setSelected} />}
+      {map && !form && <WorldMap points={points} onSelect={setSelected} />}
       {resource.loading && <Loading />}
       {!!resource.error && (
         <>

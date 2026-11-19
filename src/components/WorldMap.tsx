@@ -18,9 +18,10 @@ export default function WorldMap({ points = [], center, onSelect, onPick }: Worl
   useEffect(() => {
     let active = true;
     void import('maplibre-gl')
-      .then(({ Map, NavigationControl }) => {
+      .then(({ Map, NavigationControl, setWorkerUrl }) => {
         if (!active || !container.current) return;
         try {
+          setWorkerUrl(`${process.env.EXPO_BASE_URL ?? ''}/maplibre/maplibre-gl-worker.mjs`);
           const instance = new Map({
             container: container.current,
             style: mapStyle,
